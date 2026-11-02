@@ -1,0 +1,25 @@
+description: "PA6H GPS module (Adafruit breakout)"
+compatible: "adafruit,pa6h"
+include: [sensor-device.yaml, uart-device.yaml]
+
+properties:
+  current-speed:
+    type: int
+    required: true
+    description: UART baud rate used by the PA6H receiver.
+
+  nmea-output:
+    type: string
+    enum:
+      - "GLL"
+      - "RMC"
+      - "VTG"
+      - "GGA"
+      - "GSA"
+      - "GSV"
+      - "RMC_GGA"
+      - "RMC_GGA_GSA"
+      - "ALL"
+      - "OFF"
+    default: "ALL"
+    description: NMEA sentence output profile sent to the PA6H.

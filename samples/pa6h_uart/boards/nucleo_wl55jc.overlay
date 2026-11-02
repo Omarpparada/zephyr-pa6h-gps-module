@@ -1,0 +1,13 @@
+/* USART1: PB6/D1 is TX, PB7/D0 is RX. Connect both to the PA6H. */
+&usart1 {
+	pinctrl-0 = <&usart1_tx_pb6 &usart1_rx_pb7>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	pa6h: pa6h {
+		compatible = "adafruit,pa6h";
+		current-speed = <9600>;
+		nmea-output = "GGA";
+		status = "okay";
+	};
+};

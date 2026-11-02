@@ -1,0 +1,6 @@
+name: pa6h # Generates ZEPHYR_PA6H_MODULE_DIR
+build: # Defines how the module integrates into the build
+  kconfig: zephyr/Kconfig # Indicates the path to the input file
+  cmake: zephyr/drivers/sensor # Points to the CMake file that compiles the driver
+  settings: # Extra search paths
+    dts_root: zephyr/ # Points to the bindings

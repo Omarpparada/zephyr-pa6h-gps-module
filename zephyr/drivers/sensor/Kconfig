@@ -1,0 +1,9 @@
+# Creates CONFIG_PA6H. CMake checks if pa6h.c is built.
+config PA6H
+	bool "Adafruit PA6H GPS receiver"
+	default y
+	depends on DT_HAS_ADAFRUIT_PA6H_ENABLED
+	depends on SERIAL
+	depends on UART_INTERRUPT_DRIVEN
+	help
+	  Enable reception and forwarding of raw NMEA sentences from the PA6H.
