@@ -2,7 +2,6 @@
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
-
 #include <pa6h.h>
 
 int main(void)
@@ -14,6 +13,10 @@ int main(void)
 		printk("PA6H device not ready\n");
 		return 0;
 	}
+    // get GGA NMEA statements only
+	pa6h_send_command(gps, PMTK_SET_NMEA_OUTPUT_GGA);
+    // configure message frequency to 1 Hz
+    pa6h_send_command(gps, PMTK_SET_NMEA_UPDATE_1HZ);
 
 	printk("PA6H ready; forwarding raw NMEA sentences\n");
 	while (true) {
@@ -23,9 +26,8 @@ int main(void)
 			printk("%s\n", sentence.data);
 		} else if (err != -EAGAIN) {
 			printk("Could not read NMEA sentence: %d\n", err);
-		} else {
-			k_sleep(K_MSEC(10));
 		}
+        k_sleep(K_MSEC(1000));
 	}
 
 	return 0;

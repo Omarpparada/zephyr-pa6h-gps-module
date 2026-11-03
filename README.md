@@ -1,6 +1,6 @@
 # Zephyr Module for Adafruit PA6H
 
-A Zephyr driver for the Adafruit Ultimate GPS Breakout v3 (PA6H). Its Devicetree binding selects an NMEA output profile. The driver receives raw sentences over UART and validates checksums.
+A Zephyr driver for the Adafruit Ultimate GPS Breakout v3 (PA6H). The driver receives raw sentences over UART and validates checksums. Applications can configure the receiver with PMTK commands through the public API.
 
 ## Repository Structure
 
@@ -31,20 +31,15 @@ The sample overlay uses `&usart1`. Connect both UART directions:
 - PA6H GND to board GND.
 - Power according to the breakout board's electrical requirements (5V).
 
-The TX connection is required to send the selected PMTK314 command to the PA6H. Set the desired output using the `nmea-output` property in the PA6H Devicetree node. Check your board documentation to confirm that USART1 is enabled, its pins match your wiring, and it is not shared with the serial console. If you use another UART, change the node in the overlay. The configured baud rate is 9600 and must match the receiver.
-
-Available `nmea-output` values are `GLL`, `RMC`, `VTG`, `GGA`, `GSA`, `GSV`, `RMC_GGA`, `RMC_GGA_GSA`, `ALL`, and `OFF`. For example:
+The TX connection is required to send PMTK commands to the PA6H. Check your board documentation to confirm that USART1 is enabled, its pins match your wiring, and it is not shared with the serial console. If you use another UART, change the node in the overlay. The configured baud rate is 9600 and must match the receiver.
 
 ```dts
 pa6h: pa6h {
 	compatible = "adafruit,pa6h";
 	current-speed = <9600>;
-	nmea-output = "GGA";
 	status = "okay";
 };
 ```
-
-The driver currently intends to send the selection command after detecting the PA6H startup sentence `$PMTK010,001*2E`.
 
 ## Integration
 
@@ -85,7 +80,46 @@ if (device_is_ready(gps) && pa6h_read_sentence(gps, &sentence) == 0) {
 
 The function is non-blocking. It returns `0` when it provides a checksum-valid sentence and `-EAGAIN` when no complete sentence is queued yet. `sentence.length` contains the number of received bytes.
 
-The driver uses UART interrupts to collect bytes and separates sentences at `LF`; it also removes `CR`. `pa6h_read_sentence()` discards sentences with an invalid checksum, but does not filter by sentence type. The selected PMTK314 profile is expected to control which NMEA sentence types the receiver transmits.
+The driver uses UART interrupts to collect bytes and separates sentences at `LF`; it also removes `CR`. `pa6h_read_sentence()` discards sentences with an invalid checksum, but does not filter by sentence type.
+
+## Sending PMTK Commands
+
+PMTK commands configure the GPS over UART.
+
+The public API is declared in `include/pa6h.h`. `pa6h_send_command()` transmits the supplied string exactly as provided: it does not calculate the checksum or append a line ending. Some commands are already declared in `include/pa6h.h`:
+
+Select which NMEA sentence types the receiver outputs with a `PMTK314` command:
+
+| Macro | Output |
+| --- | --- |
+| `PMTK_SET_NMEA_OUTPUT_GGA` | GGA only |
+| `PMTK_SET_NMEA_OUTPUT_RMC` | RMC only |
+| `PMTK_SET_NMEA_OUTPUT_GLL` | GLL only |
+| `PMTK_SET_NMEA_OUTPUT_VTG` | VTG only |
+| `PMTK_SET_NMEA_OUTPUT_GSA` | GSA only |
+| `PMTK_SET_NMEA_OUTPUT_GSV` | GSV only |
+| `PMTK_SET_NMEA_OUTPUT_RMC_GGA` | RMC and GGA |
+| `PMTK_SET_NMEA_OUTPUT_RMC_GGA_GSA` | RMC, GGA, and GSA |
+| `PMTK_SET_NMEA_OUTPUT_ALL` | Standard sentence set |
+| `PMTK_SET_NMEA_OUTPUT_OFF` | Disable sentence output |
+
+Set the NMEA transmission interval with a `PMTK220` macro:
+
+| Macro | Interval |
+| --- | --- |
+| `PMTK_SET_NMEA_UPDATE_1HZ` | 1 second (1 Hz) |
+| `PMTK_SET_NMEA_UPDATE_2HZ` | 500 ms (2 Hz) |
+| `PMTK_SET_NMEA_UPDATE_5HZ` | 200 ms (5 Hz) |
+| `PMTK_SET_NMEA_UPDATE_10HZ` | 100 ms (10 Hz) |
+
+Example: request GGA only at 1 Hz after obtaining the PA6H device:
+
+```c
+pa6h_send_command(gps, PMTK_SET_NMEA_OUTPUT_GGA);
+pa6h_send_command(gps, PMTK_SET_NMEA_UPDATE_1HZ);
+```
+
+The receiver acknowledges a recognized command with a sentence such as `$PMTK001,314,3*36`; command `314` identifies the sentence-output configuration and result `3` indicates success. The selected profile is receiver configuration, so send it again after the PA6H restarts if it is not retained across power cycles. The driver does not currently wait for or verify the acknowledgement automatically.
 
 ## Current Limits
 
@@ -93,3 +127,10 @@ The driver uses UART interrupts to collect bytes and separates sentences at `LF`
 - An overlong line is discarded in its entirety.
 - The queue holds up to 8 sentences. If it is full, the oldest sentence is discarded.
 - The driver validates the NMEA checksum but does not parse fields or filter sentence types in software.
+
+## References
+https://nmeachecksum.eqth.net/
+https://cdn-shop.adafruit.com/datasheets/PMTK_A11.pdf
+https://cdn-shop.adafruit.com/datasheets/PMTK_A08.pdf
+https://github.com/adafruit/Adafruit_GPS/blob/307428f53931791799f169d07fdbf9c4c478fc15/src/Adafruit_PMTK.h
+

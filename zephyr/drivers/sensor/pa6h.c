@@ -1,7 +1,6 @@
 #define DT_DRV_COMPAT adafruit_pa6h
 
 #include <pa6h.h>
-
 #include <errno.h>
 #include <stdbool.h>
 #include <string.h>
@@ -15,29 +14,6 @@ LOG_MODULE_REGISTER(pa6h, CONFIG_SENSOR_LOG_LEVEL);
 
 #define PA6H_NMEA_QUEUE_DEPTH 8
 
-/**
- * Commands to configure the PA6H module to output specific NMEA sentences.
- * References:
- * https://cdn-shop.adafruit.com/datasheets/PMTK_A08.pdf
- * https://github.com/adafruit/Adafruit_GPS/blob/307428f53931791799f169d07fdbf9c4c478fc15/src/Adafruit_PMTK.h
- */
-#define PMTK_SET_NMEA_OUTPUT_GLL "$PMTK314,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n" ///< turn on only the GPGLL sentence
-#define PMTK_SET_NMEA_OUTPUT_RMC "$PMTK314,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n" ///< turn on only the GPRMC sentence
-#define PMTK_SET_NMEA_OUTPUT_VTG "$PMTK314,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n" ///< turn on only the GPVTG
-#define PMTK_SET_NMEA_OUTPUT_GGA "$PMTK314,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n" ///< turn on just the GPGGA
-#define PMTK_SET_NMEA_OUTPUT_GSA "$PMTK314,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n" ///< turn on just the GPGSA
-#define PMTK_SET_NMEA_OUTPUT_GSV "$PMTK314,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n" ///< turn on just the GPGSV
-#define PMTK_SET_NMEA_OUTPUT_RMC_GGA "$PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28\r\n" ///< turn on GPRMC and GPGGA
-#define PMTK_SET_NMEA_OUTPUT_RMC_GGA_GSA "$PMTK314,0,1,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n" ///< turn on GPRMC, GPGGA and GPGSA
-#define PMTK_SET_NMEA_OUTPUT_ALL "$PMTK314,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0*28\r\n" ///< turn on ALL THE DATA
-#define PMTK_SET_NMEA_OUTPUT_OFF "$PMTK314,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28\r\n" ///< turn off output
-#define PA6H_NMEA_OUTPUT(name) UTIL_CAT(PMTK_SET_NMEA_OUTPUT_, name)
-
-/**
- * Command that indicates the PA6H module has successfully powered on.
- */
-#define PMTK_POWER_ON_ACK "$PMTK010,001*2E"
-
 struct pa6h_config
 {
     const struct device *uart;
@@ -48,6 +24,7 @@ struct pa6h_config
 struct pa6h_data
 {
     struct k_msgq *sentence_queue;
+    const struct pa6h_config *config;
     char line[PA6H_NMEA_SENTENCE_MAX];
     size_t line_len;
     bool line_overflow;
@@ -65,7 +42,7 @@ static bool pa6h_check_sentence(const char *line, size_t len)
     // Check that the sentence starts with '$'
     if (line[0] != '$')
     {
-        LOG_ERR("Invalid NMEA sentence: does not start with '$'");
+        LOG_DBG("Invalid NMEA sentence: does not start with '$'");
         return false;
     }
 
@@ -74,7 +51,7 @@ static bool pa6h_check_sentence(const char *line, size_t len)
     // If there is no asterisk or the checksum is incomplete, the sentence is invalid
     if (!checksum_at || checksum_at + 3 > line + len)
     {
-        LOG_ERR("Invalid NMEA sentence: missing or incomplete checksum");
+        LOG_DBG("Invalid NMEA sentence: missing or incomplete checksum");
         return false;
     }
 
@@ -89,7 +66,7 @@ static bool pa6h_check_sentence(const char *line, size_t len)
     uint8_t sentence_checksum;
     if (sscanf(checksum_at + 1, "%2hhX", &sentence_checksum) != 1)
     {
-        LOG_ERR("Invalid NMEA sentence: failed to parse checksum");
+        LOG_DBG("Invalid NMEA sentence: failed to parse checksum");
         return false;
     }
 
@@ -168,19 +145,18 @@ static void pa6h_uart_isr(const struct device *uart, void *user_data)
     }
 }
 
-int pa6h_read_sentence(const struct device *dev,
-                       struct pa6h_nmea_sentence *sentence)
+int pa6h_read_sentence(const struct device *dev, struct pa6h_nmea_sentence *sentence)
 {
     struct pa6h_data *data;
     int err;
     // Validate input parameters
     if (dev == NULL || sentence == NULL)
     {
+        LOG_ERR("Invalid input parameters");
         return -EINVAL;
     }
 
     data = dev->data;
-    const struct pa6h_config *config = dev->config;
     // Keep reading sentences until a valid one is found
     do
     {
@@ -189,16 +165,19 @@ int pa6h_read_sentence(const struct device *dev,
         {
             return err == -ENOMSG ? -EAGAIN : err;
         }
-        // If the sentence is a power-on acknowledgment, send the PMTK output command to the module
-        if (strcmp(sentence->data, PMTK_POWER_ON_ACK) == 0)
-        {
-            for (const char *command = config->nmea_output_command; *command != '\0'; command++) {
-                uart_poll_out(config->uart, *command);
-            }
-        }
     } while (!pa6h_check_sentence(sentence->data, sentence->length));
 
     return 0;
+}
+
+void pa6h_send_command(const struct device *dev, const char *command)
+{
+    const struct pa6h_config *config = dev->config;
+    while(*command != '\0')
+    {
+        uart_poll_out(config->uart, *command);
+        command++;
+    }
 }
 
 static int pa6h_init(const struct device *dev)
@@ -212,6 +191,8 @@ static int pa6h_init(const struct device *dev)
         LOG_ERR("UART device not ready");
         return -ENODEV;
     }
+
+    data->config = config;
 
     err = uart_configure(config->uart, &config->uart_config);
     if (err < 0)
@@ -240,8 +221,6 @@ static int pa6h_init(const struct device *dev)
     };                                                                          \
     static const struct pa6h_config pa6h_config_##inst = {                      \
         .uart = DEVICE_DT_GET(DT_PARENT(DT_DRV_INST(inst))),                    \
-        .nmea_output_command = PA6H_NMEA_OUTPUT(                               \
-            DT_INST_STRING_TOKEN(inst, nmea_output)),                        \
         .uart_config = {                                                        \
             .baudrate = DT_INST_PROP(inst, current_speed),                      \
             .parity = UART_CFG_PARITY_NONE,                                     \

@@ -7,7 +7,6 @@
 	pa6h: pa6h {
 		compatible = "adafruit,pa6h";
 		current-speed = <9600>;
-		nmea-output = "GGA";
 		status = "okay";
 	};
 };
