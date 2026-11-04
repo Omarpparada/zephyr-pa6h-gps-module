@@ -7,12 +7,14 @@
 int main(void)
 {
 	const struct device *gps = DEVICE_DT_GET_ONE(adafruit_pa6h);
-	struct pa6h_nmea_sentence sentence;
+	pa6h_nmea_sentence sentence;
 
 	if (!device_is_ready(gps)) {
 		printk("PA6H device not ready\n");
 		return 0;
 	}
+	// sleep for 200 milliseconds to allow the GPS module to initialize & send commands
+	k_sleep(K_MSEC(500));
     // get GGA NMEA statements only
 	pa6h_send_command(gps, PMTK_SET_NMEA_OUTPUT_GGA);
     // configure message frequency to 1 Hz
@@ -20,15 +22,13 @@ int main(void)
 
 	printk("PA6H ready; forwarding raw NMEA sentences\n");
 	while (true) {
-		int err = pa6h_read_sentence(gps, &sentence);
+		int err = pa6h_read_sentence(gps, &sentence, K_NO_WAIT);
 
 		if (err == 0) {
-			printk("%s\n", sentence.data);
+			printk("%s\n", sentence);
 		} else if (err != -EAGAIN) {
 			printk("Could not read NMEA sentence: %d\n", err);
 		}
         k_sleep(K_MSEC(1000));
 	}
-
-	return 0;
 }

@@ -2,8 +2,7 @@
 #define PA6H_H_
 
 #include <zephyr/device.h>
-#include <stddef.h>
-#include <stdint.h>
+#include <zephyr/kernel.h>
 
 #define PA6H_NMEA_SENTENCE_MAX 128
 
@@ -28,14 +27,10 @@
 #define PMTK_SET_NMEA_UPDATE_5HZ "$PMTK220,200*2C\r\n"  // set NMEA output rate to 5 Hz
 #define PMTK_SET_NMEA_UPDATE_10HZ "$PMTK220,100*2F\r\n" // set NMEA output rate to 10 Hz
 
-struct pa6h_nmea_sentence {
-	size_t length;
-	char data[PA6H_NMEA_SENTENCE_MAX];
-};
+typedef char pa6h_nmea_sentence[PA6H_NMEA_SENTENCE_MAX];
 
 /* Non-blocking; returns -EAGAIN when no complete NMEA sentence is queued. */
-int pa6h_read_sentence(const struct device *dev,
-		       struct pa6h_nmea_sentence *sentence);
+int pa6h_read_sentence(const struct device *dev, pa6h_nmea_sentence *sentence, k_timeout_t timeout);
 void pa6h_send_command(const struct device *dev, const char *command);
 
 #endif /* PA6H_H_ */

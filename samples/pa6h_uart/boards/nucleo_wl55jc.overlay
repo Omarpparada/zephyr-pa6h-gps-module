@@ -3,10 +3,10 @@
 	pinctrl-0 = <&usart1_tx_pb6 &usart1_rx_pb7>;
 	pinctrl-names = "default";
 	status = "okay";
+	current-speed = <9600>;
 
 	pa6h: pa6h {
 		compatible = "adafruit,pa6h";
-		current-speed = <9600>;
 		status = "okay";
 	};
 };
