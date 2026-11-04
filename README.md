@@ -36,7 +36,6 @@ The TX connection is required to send PMTK commands to the PA6H. Check your boar
 ```dts
 pa6h: pa6h {
 	compatible = "adafruit,pa6h";
-	current-speed = <9600>;
 	status = "okay";
 };
 ```
@@ -125,7 +124,7 @@ The receiver acknowledges a recognized command with a sentence such as `$PMTK001
 
 - Each sentence can contain up to 127 bytes; the remaining buffer byte is reserved for `\0`.
 - An overlong line is discarded in its entirety.
-- The queue holds up to 8 sentences. If it is full, the oldest sentence is discarded.
+- The queue holds up to 8 sentences. If it is full, the sentence is discarded.
 - The driver validates the NMEA checksum but does not parse fields or filter sentence types in software.
 
 ## References
