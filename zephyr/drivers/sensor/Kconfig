@@ -5,5 +5,6 @@ config PA6H
 	depends on DT_HAS_ADAFRUIT_PA6H_ENABLED
 	depends on SERIAL
 	depends on UART_INTERRUPT_DRIVEN
+	select RING_BUFFER
 	help
 	  Enable reception and forwarding of raw NMEA sentences from the PA6H.

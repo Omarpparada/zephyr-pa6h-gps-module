@@ -1,8 +1,16 @@
 #include <errno.h>
+#include <string.h>
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <pa6h.h>
+
+static void configure_gps(const struct device *gps)
+{
+	// GGA sentences only, at 1 Hz
+	pa6h_send_command(gps, PMTK_SET_NMEA_OUTPUT_GGA);
+	pa6h_send_command(gps, PMTK_SET_NMEA_UPDATE_1HZ);
+}
 
 int main(void)
 {
@@ -13,22 +21,23 @@ int main(void)
 		printk("PA6H device not ready\n");
 		return 0;
 	}
-	// sleep for 200 milliseconds to allow the GPS module to initialize & send commands
-	k_sleep(K_MSEC(500));
-    // get GGA NMEA statements only
-	pa6h_send_command(gps, PMTK_SET_NMEA_OUTPUT_GGA);
-    // configure message frequency to 1 Hz
-    pa6h_send_command(gps, PMTK_SET_NMEA_UPDATE_1HZ);
+	// Allow the GPS module to initialize before sending commands
+	k_sleep(K_SECONDS(1));
+	configure_gps(gps);
 
 	printk("PA6H ready; forwarding raw NMEA sentences\n");
 	while (true) {
-		int err = pa6h_read_sentence(gps, &sentence, K_NO_WAIT);
-
+		int err = pa6h_read_sentence(gps, &sentence, K_MSEC(1200));
 		if (err == 0) {
-			printk("%s\n", sentence);
+			if (strncmp(sentence + 3, "GGA", 3) == 0) {
+				printk("%s\n", sentence);
+			} else if (strncmp(sentence, "$PMTK", 5) != 0) {
+				// A power cycle makes the module fall back to its default output
+				printk("Unexpected sentence, reconfiguring PA6H\n");
+				configure_gps(gps);
+			}
 		} else if (err != -EAGAIN) {
 			printk("Could not read NMEA sentence: %d\n", err);
 		}
-        k_sleep(K_MSEC(1000));
 	}
 }

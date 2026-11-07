@@ -1,6 +1,6 @@
 # Zephyr Module for Adafruit PA6H
 
-A Zephyr driver for the Adafruit Ultimate GPS Breakout v3 (PA6H). The driver receives raw sentences over UART and validates checksums. Applications can configure the receiver with PMTK commands through the public API.
+A Zephyr driver for the Adafruit Ultimate GPS Breakout v3 (PA6H). The driver receives raw NMEA sentences over UART, validates their checksums, and hands them to the application. Applications can configure the receiver with PMTK commands through the public API.
 
 ## Repository Structure
 
@@ -14,17 +14,18 @@ zephyr-pa6h-gps-module/
 │   └── drivers/sensor/
 │       ├── Kconfig                        # CONFIG_PA6H
 │       ├── CMakeLists.txt                 # Builds the driver and exposes include/
-│       └── pa6h.c                         # UART reception and sentence queue
+│       └── pa6h.c                         # UART reception (ring buffer) and sentence parsing
 └── samples/pa6h_uart/
-	├── app.overlay                        # PA6H on USART1 at 9600 baud
+	├── boards/nucleo_wl55jc.overlay       # PA6H on USART1 at 9600 baud
 	├── prj.conf                           # Sample configuration
 	├── CMakeLists.txt                     # Configures the Zephyr application
-	└── src/main.c                         # Prints received sentences
+	├── Makefile                           # Build, flash and monitor shortcuts
+	└── src/main.c                         # Prints GGA sentences and reconfigures the GPS if needed
 ```
 
 ## Wiring
 
-The sample overlay uses `&usart1`. Connect both UART directions:
+The sample overlay (`boards/nucleo_wl55jc.overlay`) uses `&usart1`. Connect both UART directions:
 
 - PA6H TX to USART1 RX (PB7 / Arduino D0).
 - USART1 TX (PB6 / Arduino D1) to PA6H RX.
@@ -47,9 +48,9 @@ The sample adds this repository to `EXTRA_ZEPHYR_MODULES` before calling `find_p
 The driver activation flow is:
 
 ```text
-app.overlay: compatible = "adafruit,pa6h"
+overlay: compatible = "adafruit,pa6h"
   └─ binding: generates DT_HAS_ADAFRUIT_PA6H_ENABLED
-	   └─ Kconfig: CONFIG_PA6H depends on the node and SERIAL/UART_INTERRUPT_DRIVEN
+	   └─ Kconfig: CONFIG_PA6H depends on the node and SERIAL/UART_INTERRUPT_DRIVEN, and selects RING_BUFFER
 			└─ CMake: builds pa6h.c when CONFIG_PA6H is enabled
 ```
 
@@ -70,16 +71,22 @@ The public interface is in `include/pa6h.h`. The application gets the device by 
 
 ```c
 const struct device *gps = DEVICE_DT_GET_ONE(adafruit_pa6h);
-struct pa6h_nmea_sentence sentence;
+pa6h_nmea_sentence sentence;
 
-if (device_is_ready(gps) && pa6h_read_sentence(gps, &sentence) == 0) {
-	printk("%s\n", sentence.data);
+if (device_is_ready(gps) && pa6h_read_sentence(gps, &sentence, K_MSEC(500)) == 0) {
+	printk("%s\n", sentence);
 }
 ```
 
-The function is non-blocking. It returns `0` when it provides a checksum-valid sentence and `-EAGAIN` when no complete sentence is queued yet. `sentence.length` contains the number of received bytes.
+`pa6h_nmea_sentence` is a `char` array of `PA6H_NMEA_SENTENCE_MAX` (128) bytes. On success it holds a null-terminated sentence without `CR`/`LF`.
 
-The driver uses UART interrupts to collect bytes and separates sentences at `LF`; it also removes `CR`. `pa6h_read_sentence()` discards sentences with an invalid checksum, but does not filter by sentence type.
+`pa6h_read_sentence()` blocks for up to `timeout` in total, even if the sentence arrives in several UART chunks. It returns `0` when it provides a checksum-valid sentence and `-EAGAIN` if none arrives before the timeout (`K_NO_WAIT` polls once). Sentences with an invalid checksum are discarded silently, and the function does not filter by sentence type.
+
+### Reception design
+
+The UART interrupt handler only drains the UART FIFO into a 256-byte ring buffer and gives a semaphore. Line assembly, `CR`/`LF` removal and checksum validation run in the thread that calls `pa6h_read_sentence()`, so the interrupt stays short. A partial sentence remains in the ring buffer until its `LF` arrives.
+
+Only one thread should call `pa6h_read_sentence()` per device; the driver does not lock the ring buffer for several readers.
 
 ## Sending PMTK Commands
 
@@ -118,13 +125,19 @@ pa6h_send_command(gps, PMTK_SET_NMEA_OUTPUT_GGA);
 pa6h_send_command(gps, PMTK_SET_NMEA_UPDATE_1HZ);
 ```
 
-The receiver acknowledges a recognized command with a sentence such as `$PMTK001,314,3*36`; command `314` identifies the sentence-output configuration and result `3` indicates success. The selected profile is receiver configuration, so send it again after the PA6H restarts if it is not retained across power cycles. The driver does not currently wait for or verify the acknowledgement automatically.
+The receiver acknowledges a recognized command with a sentence such as `$PMTK001,314,3*36`; command `314` identifies the sentence-output configuration and result `3` indicates success. The driver does not currently wait for or verify the acknowledgement automatically.
+
+### Recovering from a power cycle
+
+The sample keeps only GGA sentences. If the GPS loses power while running, it falls back to its default output (RMC, GGA, GSA, ...). `src/main.c` detects this: any sentence that is neither GGA nor a `$PMTK` acknowledgement triggers `configure_gps()`, which sends the two commands above again.
+
+`$PMTK` sentences are ignored because they are the receiver's replies to those commands. Non-GGA sentences may still arrive for a moment after the commands are sent, so a reconfiguration can be repeated a few times before the receiver settles.
 
 ## Current Limits
 
-- Each sentence can contain up to 127 bytes; the remaining buffer byte is reserved for `\0`.
-- An overlong line is discarded in its entirety.
-- The queue holds up to 8 sentences. If it is full, the sentence is discarded.
+- A line, including its `CR` and `LF`, must fit in 127 bytes. A longer line without `LF` has its first 127 bytes discarded; the tail then fails the checksum and is dropped too.
+- The ring buffer holds 256 bytes (`PA6H_RX_BUFFER_SIZE`). If the application does not read fast enough, new bytes are dropped and the checksum rejects the damaged sentence.
+- Only one reader thread per device is supported.
 - The driver validates the NMEA checksum but does not parse fields or filter sentence types in software.
 
 ## References

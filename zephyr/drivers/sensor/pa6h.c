@@ -8,11 +8,12 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/ring_buffer.h>
 #include <zephyr/sys/util.h>
 
 LOG_MODULE_REGISTER(pa6h, CONFIG_SENSOR_LOG_LEVEL);
 
-#define PA6H_NMEA_QUEUE_DEPTH 8
+#define PA6H_RX_BUFFER_SIZE 256
 
 struct pa6h_config
 {
@@ -22,10 +23,9 @@ struct pa6h_config
 
 struct pa6h_data
 {
-    struct k_msgq *sentence_queue;
     const struct pa6h_config *config;
-    pa6h_nmea_sentence line;
-    size_t line_len;
+    struct ring_buf rx_buffer;
+    struct k_sem rx_sem;
 };
 
 /**
@@ -40,6 +40,12 @@ static bool pa6h_check_sentence(const char *line)
     if (line == NULL || line[0] != '$')
     {
         LOG_DBG("No sentence or does not start with '$'");
+        return false;
+    }
+    // Check that the sentence has only a '$'
+    if (strchr(line + 1, '$') != NULL)
+    {
+        LOG_DBG("Invalid NMEA sentence: contains multiple '$' characters");
         return false;
     }
     size_t len = strlen(line);
@@ -68,15 +74,14 @@ static bool pa6h_check_sentence(const char *line)
         checksum ^= (uint8_t)(*p);
     }
 
-
     return checksum == sentence_checksum;
 }
 
 /**
  * UART interrupt service routine for the PA6H module.
  *
- * This ISR reads incoming data from the UART, assembles NMEA sentences,
- * and places complete sentences into the message queue.
+ * Only drains the UART FIFO into the ring buffer and wakes the reader.
+ * Parsing and validation happen in pa6h_read_sentence().
  *
  * @param uart The UART device.
  * @param user_data Pointer to the PA6H data structure.
@@ -86,62 +91,67 @@ static void pa6h_uart_isr(const struct device *uart, void *user_data)
     struct pa6h_data *data = user_data;
     uint8_t buffer[16];
 
-    uart_irq_update(uart);
+    if (!uart_irq_update(uart))
+        return;
     while (uart_irq_rx_ready(uart))
     {
         int count = uart_fifo_read(uart, buffer, sizeof(buffer));
-        if (count > 0)
-        {
-            for (int index = 0; index < count; index++)
-            {
-                char value = (char)buffer[index];
-                // Check for newline character indicating end of NMEA sentence
-                if (value == '\n')
-                {
-                    // If the line is not overflowing and has content -> complete sentence
-                    if (data->line_len > 0 && data->line_len < sizeof(data->line) - 1)
-                    {
-                        // Finish string & send to message queue (discard it if full)
-                        data->line[data->line_len] = '\0';
-                        (void)k_msgq_put(data->sentence_queue, &data->line, K_NO_WAIT);
-                    }
-                    // Reset the line buffer for the next sentence
-                    data->line_len = 0;
-                }
-                // If the character is not a carriage return and the line is not overflowing, add it to the line buffer
-                else if (value != '\r' && data->line_len < sizeof(data->line) - 1)
-                {
-                    // Add the character to the line buffer
-                    data->line[data->line_len++] = value;
-                }
-            }
-        }
+        if (count <= 0)
+            break;
+        // If overflow -> drop bytes
+        (void)ring_buf_put(&data->rx_buffer, buffer, count);
     }
+    k_sem_give(&data->rx_sem);
 }
 
 int pa6h_read_sentence(const struct device *dev, pa6h_nmea_sentence *sentence, k_timeout_t timeout)
 {
-    struct pa6h_data *data;
-    int err;
+    
     // Validate input parameters
     if (dev == NULL || sentence == NULL)
     {
         LOG_ERR("Invalid input parameters");
         return -EINVAL;
     }
+    
+    struct pa6h_data *data = dev->data;
+    k_timepoint_t end = sys_timepoint_calc(timeout);
+    char *line = *sentence;
 
-    data = dev->data;
-    // Keep reading sentences until a valid one is found
-    do
+    while (true)
     {
-        err = k_msgq_get(data->sentence_queue, sentence, timeout);
-        if (err < 0)
-        {
-            return err == -ENOMSG ? -EAGAIN : err;
-        }
-    } while (!pa6h_check_sentence(*sentence));
+        // Peek without consuming: a partial sentence stays in the ring buffer
+        size_t available = ring_buf_peek(&data->rx_buffer, (uint8_t *)line, sizeof(pa6h_nmea_sentence) - 1);
+        // Search for a newline character
+        char *newline = memchr(line, '\n', available);
 
-    return 0;
+        if (newline)
+        {
+            // Calculate the length of the line up to the newline character
+            size_t len = (size_t)(newline - line);
+            // Consume the line including the '\n' char from the buffer
+            (void)ring_buf_get(&data->rx_buffer, NULL, len + 1);
+            // Remove the '\n' char from the length if present
+            if (len > 0 && line[len - 1] == '\r')
+                len--;
+            // Terminate the line
+            line[len] = '\0';
+            if (pa6h_check_sentence(line))
+                return 0;
+            continue;
+        }
+
+        // If there is not a '\n' in the line, discard it from the buffer
+        if (available == sizeof(pa6h_nmea_sentence) - 1)
+        {
+            (void)ring_buf_get(&data->rx_buffer, NULL, available);
+            continue;
+        }
+
+        // Wait for the ISR to deliver more bytes. If the timeout expires, return -EAGAIN
+        if (k_sem_take(&data->rx_sem, sys_timepoint_timeout(end)) < 0)
+            return -EAGAIN;
+    }
 }
 
 void pa6h_send_command(const struct device *dev, const char *command)
@@ -187,24 +197,25 @@ static int pa6h_init(const struct device *dev)
     return 0;
 }
 
-#define PA6H_INIT(inst)                                                  \
-    K_MSGQ_DEFINE(pa6h_sentence_queue_##inst,                            \
-                  sizeof(pa6h_nmea_sentence), PA6H_NMEA_QUEUE_DEPTH, 4); \
-    static struct pa6h_data pa6h_data_##inst = {                         \
-        .sentence_queue = &pa6h_sentence_queue_##inst,                   \
-    };                                                                   \
-    static const struct pa6h_config pa6h_config_##inst = {               \
-        .uart = DEVICE_DT_GET(DT_PARENT(DT_DRV_INST(inst))),             \
-        .uart_config = {                                                 \
-            .baudrate = DT_N_S_soc_S_serial_40013800_P_current_speed,               \
-            .parity = UART_CFG_PARITY_NONE,                              \
-            .stop_bits = UART_CFG_STOP_BITS_1,                           \
-            .data_bits = UART_CFG_DATA_BITS_8,                           \
-            .flow_ctrl = UART_CFG_FLOW_CTRL_NONE,                        \
-        },                                                               \
-    };                                                                   \
-    DEVICE_DT_INST_DEFINE(inst, pa6h_init, NULL, &pa6h_data_##inst,      \
-                          &pa6h_config_##inst, POST_KERNEL,              \
+#define PA6H_INIT(inst)                                               \
+    static uint8_t pa6h_rx_storage_##inst[PA6H_RX_BUFFER_SIZE];       \
+    static struct pa6h_data pa6h_data_##inst = {                      \
+        .rx_buffer = RING_BUF_INIT(pa6h_rx_storage_##inst,            \
+                                   sizeof(pa6h_rx_storage_##inst)),   \
+        .rx_sem = Z_SEM_INITIALIZER(pa6h_data_##inst.rx_sem, 0, 1),   \
+    };                                                                \
+    static const struct pa6h_config pa6h_config_##inst = {            \
+        .uart = DEVICE_DT_GET(DT_PARENT(DT_DRV_INST(inst))),          \
+        .uart_config = {                                              \
+            .baudrate = DT_N_S_soc_S_serial_40013800_P_current_speed, \
+            .parity = UART_CFG_PARITY_NONE,                           \
+            .stop_bits = UART_CFG_STOP_BITS_1,                        \
+            .data_bits = UART_CFG_DATA_BITS_8,                        \
+            .flow_ctrl = UART_CFG_FLOW_CTRL_NONE,                     \
+        },                                                            \
+    };                                                                \
+    DEVICE_DT_INST_DEFINE(inst, pa6h_init, NULL, &pa6h_data_##inst,   \
+                          &pa6h_config_##inst, POST_KERNEL,           \
                           CONFIG_KERNEL_INIT_PRIORITY_DEVICE, NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(PA6H_INIT)

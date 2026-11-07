@@ -29,7 +29,6 @@
 
 typedef char pa6h_nmea_sentence[PA6H_NMEA_SENTENCE_MAX];
 
-/* Non-blocking; returns -EAGAIN when no complete NMEA sentence is queued. */
 int pa6h_read_sentence(const struct device *dev, pa6h_nmea_sentence *sentence, k_timeout_t timeout);
 void pa6h_send_command(const struct device *dev, const char *command);
 
