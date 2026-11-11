@@ -80,7 +80,8 @@ static bool pa6h_check_sentence(const char *line)
 /**
  * UART interrupt service routine for the PA6H module.
  *
- * Only drains the UART FIFO into the ring buffer and wakes the reader.
+ * Only drains the UART FIFO into the ring buffer and wakes the reader once a
+ * complete line ('\n') has arrived, or when bytes are dropped so it can drain.
  * Parsing and validation happen in pa6h_read_sentence().
  *
  * @param uart The UART device.
@@ -90,6 +91,7 @@ static void pa6h_uart_isr(const struct device *uart, void *user_data)
 {
     struct pa6h_data *data = user_data;
     uint8_t buffer[16];
+    bool wake = false;
 
     if (!uart_irq_update(uart))
         return;
@@ -99,9 +101,13 @@ static void pa6h_uart_isr(const struct device *uart, void *user_data)
         if (count <= 0)
             break;
         // If overflow -> drop bytes
-        (void)ring_buf_put(&data->rx_buffer, buffer, count);
+        if (ring_buf_put(&data->rx_buffer, buffer, count) < (uint32_t)count)
+            wake = true;
+        if (memchr(buffer, '\n', count) != NULL)
+            wake = true;
     }
-    k_sem_give(&data->rx_sem);
+    if (wake)
+        k_sem_give(&data->rx_sem);
 }
 
 int pa6h_read_sentence(const struct device *dev, pa6h_nmea_sentence *sentence, k_timeout_t timeout)

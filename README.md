@@ -84,7 +84,7 @@ if (device_is_ready(gps) && pa6h_read_sentence(gps, &sentence, K_MSEC(500)) == 0
 
 ### Reception design
 
-The UART interrupt handler only drains the UART FIFO into a 256-byte ring buffer and gives a semaphore. Line assembly, `CR`/`LF` removal and checksum validation run in the thread that calls `pa6h_read_sentence()`, so the interrupt stays short. A partial sentence remains in the ring buffer until its `LF` arrives.
+The UART interrupt handler only drains the UART FIFO into a 256-byte ring buffer and gives a semaphore when a line ending (`LF`) arrives, or when the buffer overflows, so the reader wakes once per sentence instead of once per byte. Line assembly, `CR`/`LF` removal and checksum validation run in the thread that calls `pa6h_read_sentence()`, so the interrupt stays short. A partial sentence remains in the ring buffer until its `LF` arrives.
 
 Only one thread should call `pa6h_read_sentence()` per device; the driver does not lock the ring buffer for several readers.
 
